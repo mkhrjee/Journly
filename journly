@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Launch Journly. Requires only python3 (stdlib), nothing else.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
+exec python3 journly.py "$@"
