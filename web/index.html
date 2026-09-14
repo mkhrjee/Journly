@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Journly</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="sidebar">
+    <header class="sidebar-head">
+      <h1 class="brand">Journly</h1>
+      <button class="icon-button" id="theme-toggle" type="button"
+              title="Toggle theme (&#8984;&#8679;L)" aria-label="Toggle theme">&#9789;</button>
+    </header>
+
+    <div class="search-wrap">
+      <input id="search" class="search" type="search" placeholder="Search" autocomplete="off"
+             spellcheck="false" aria-label="Search entries">
+    </div>
+
+    <nav class="entry-list" id="entry-list" aria-label="Entries"></nav>
+  </aside>
+
+  <main class="editor-pane">
+    <div class="editor-head">
+      <h2 class="entry-date" id="entry-date"></h2>
+    </div>
+
+    <textarea id="editor" class="editor" spellcheck="true" autocomplete="off"
+              placeholder="Write." aria-label="Journal entry"></textarea>
+
+    <footer class="status">
+      <span id="word-count">0 words</span>
+      <span id="save-state" class="save-state"></span>
+    </footer>
+  </main>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
