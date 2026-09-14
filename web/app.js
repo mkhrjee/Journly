@@ -10,7 +10,15 @@
   const wordCountEl = document.getElementById("word-count");
   const saveStateEl = document.getElementById("save-state");
   const themeToggleEl = document.getElementById("theme-toggle");
+  const lockButtonEl = document.getElementById("lock-button");
   const appEl = document.querySelector(".app");
+  const lockScreenEl = document.getElementById("lock-screen");
+  const lockFormEl = document.getElementById("lock-form");
+  const lockPasswordEl = document.getElementById("lock-password");
+  const lockPasswordConfirmEl = document.getElementById("lock-password-confirm");
+  const lockSubmitEl = document.getElementById("lock-submit");
+  const lockSubtitleEl = document.getElementById("lock-subtitle");
+  const lockErrorEl = document.getElementById("lock-error");
 
   const AUTOSAVE_DELAY = 800;
   const THEME_KEY = "journly-theme";
@@ -129,6 +137,10 @@
       body: JSON.stringify({ content }),
     })
       .then((res) => {
+        if (res.status === 401) {
+          showLockScreen(true);
+          throw new Error("session expired");
+        }
         if (!res.ok) throw new Error("save failed");
         return res.json();
       })
@@ -275,6 +287,100 @@
     }
   }
 
+  // -------------------- auth / lock screen --------------------
+
+  let setupMode = false; // true when no password exists yet and we're creating one
+
+  function showLockScreen(configured) {
+    setupMode = !configured;
+    lockScreenEl.hidden = false;
+    appEl.hidden = true;
+    lockErrorEl.textContent = "";
+    lockPasswordEl.value = "";
+    lockPasswordConfirmEl.value = "";
+    lockPasswordConfirmEl.hidden = !setupMode;
+    lockSubtitleEl.textContent = setupMode
+      ? "Create a password to protect your journal"
+      : "Enter your password";
+    lockSubmitEl.textContent = setupMode ? "Create password" : "Unlock";
+    window.setTimeout(() => lockPasswordEl.focus(), 0);
+  }
+
+  function showApp() {
+    lockScreenEl.hidden = true;
+    appEl.hidden = false;
+  }
+
+  async function checkAuthAndBoot() {
+    const res = await fetch("/api/auth/status");
+    const data = await res.json();
+    if (data.authenticated) {
+      showApp();
+      await bootApp();
+    } else {
+      showLockScreen(data.configured);
+    }
+  }
+
+  async function bootApp() {
+    initTheme();
+    await fetchEntries();
+    await loadEntry(today);
+  }
+
+  lockFormEl.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    lockErrorEl.textContent = "";
+    const password = lockPasswordEl.value;
+
+    if (setupMode) {
+      const confirm = lockPasswordConfirmEl.value;
+      if (password.length < 4) {
+        lockErrorEl.textContent = "Password must be at least 4 characters.";
+        return;
+      }
+      if (password !== confirm) {
+        lockErrorEl.textContent = "Passwords do not match.";
+        return;
+      }
+      const res = await fetch("/api/auth/setup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        lockErrorEl.textContent = data.error || "Could not set password.";
+        return;
+      }
+      showApp();
+      await bootApp();
+      return;
+    }
+
+    const res = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+    if (!res.ok) {
+      lockErrorEl.textContent = "Incorrect password.";
+      lockPasswordEl.value = "";
+      lockPasswordEl.focus();
+      return;
+    }
+    showApp();
+    await bootApp();
+  });
+
+  async function lockNow() {
+    flushSave(false);
+    await fetch("/api/auth/logout", { method: "POST" });
+    showLockScreen(true);
+  }
+
+  lockButtonEl.addEventListener("click", lockNow);
+
   // -------------------- wire up --------------------
 
   editorEl.addEventListener("input", () => {
@@ -301,6 +407,5 @@
 
   // -------------------- boot --------------------
 
-  initTheme();
-  fetchEntries().then(() => loadEntry(today));
+  checkAuthAndBoot();
 })();

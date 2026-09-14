@@ -7,12 +7,29 @@
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-<div class="app">
+<div class="lock-screen" id="lock-screen" hidden>
+  <form class="lock-box" id="lock-form" autocomplete="off">
+    <h1 class="lock-brand">Journly</h1>
+    <p class="lock-subtitle" id="lock-subtitle">Enter your password</p>
+    <input type="password" id="lock-password" class="lock-input" placeholder="Password"
+           autocomplete="current-password" aria-label="Password">
+    <input type="password" id="lock-password-confirm" class="lock-input" placeholder="Confirm password"
+           autocomplete="new-password" aria-label="Confirm password" hidden>
+    <button type="submit" class="lock-submit" id="lock-submit">Unlock</button>
+    <p class="lock-error" id="lock-error"></p>
+  </form>
+</div>
+
+<div class="app" id="app" hidden>
   <aside class="sidebar" id="sidebar">
     <header class="sidebar-head">
       <h1 class="brand">Journly</h1>
-      <button class="icon-button" id="theme-toggle" type="button"
-              title="Toggle theme (&#8984;&#8679;L)" aria-label="Toggle theme">&#9789;</button>
+      <div class="sidebar-actions">
+        <button class="icon-button" id="lock-button" type="button"
+                title="Lock" aria-label="Lock">&#128274;</button>
+        <button class="icon-button" id="theme-toggle" type="button"
+                title="Toggle theme (&#8984;&#8679;L)" aria-label="Toggle theme">&#9789;</button>
+      </div>
     </header>
 
     <div class="search-wrap">

@@ -8,12 +8,19 @@ as a plain Markdown file in entries/.
 from __future__ import annotations
 
 import argparse
+import getpass
+import hashlib
+import hmac
+import http.cookies
 import json
 import os
 import re
+import secrets
 import socket
+import sys
 import tempfile
 import threading
+import time
 import webbrowser
 from datetime import datetime, date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,10 +30,15 @@ from urllib.parse import urlparse, parse_qs, unquote
 ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
 ENTRIES_DIR = ROOT / "entries"
+AUTH_FILE = ROOT / ".journly_auth.json"
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 PREVIEW_CHARS = 120
 SEARCH_RESULT_LIMIT = 200
+
+SESSION_COOKIE = "journly_session"
+SESSION_DURATION = 3600  # 1 hour, refreshed on every authenticated request
+PBKDF2_ITERATIONS = 200_000
 
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -172,6 +184,94 @@ def search_entries(query: str) -> list[dict]:
 
 
 # --------------------------------------------------------------------------
+# Auth
+# --------------------------------------------------------------------------
+#
+# A single local password gates the journal. The password is never stored in
+# plaintext: only a salted PBKDF2 hash lives in AUTH_FILE, alongside a random
+# session secret used to sign session cookies. Sessions are stateless signed
+# tokens (expiry + HMAC), not server-side session storage, so restarting the
+# server does not require re-implementing anything - it just re-validates.
+
+_auth_lock = threading.Lock()
+
+
+def load_auth() -> dict | None:
+    if not AUTH_FILE.exists():
+        return None
+    try:
+        return json.loads(AUTH_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def auth_configured() -> bool:
+    return load_auth() is not None
+
+
+def hash_password(password: str, salt: bytes) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS).hex()
+
+
+def set_password(password: str) -> None:
+    """Create or overwrite the stored password. Generates a fresh session
+    secret too, which invalidates any previously issued session cookies."""
+    salt = secrets.token_bytes(16)
+    data = {
+        "salt": salt.hex(),
+        "hash": hash_password(password, salt),
+        "session_secret": secrets.token_hex(32),
+    }
+    with _auth_lock:
+        AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=str(AUTH_FILE.parent), suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(data))
+        os.replace(tmp_name, AUTH_FILE)
+        try:
+            os.chmod(AUTH_FILE, 0o600)
+        except OSError:
+            pass
+
+
+def verify_password(password: str) -> bool:
+    auth = load_auth()
+    if auth is None:
+        return False
+    expected = auth.get("hash", "")
+    salt = bytes.fromhex(auth.get("salt", ""))
+    candidate = hash_password(password, salt)
+    return hmac.compare_digest(candidate, expected)
+
+
+def _session_secret() -> str | None:
+    auth = load_auth()
+    return auth.get("session_secret") if auth else None
+
+
+def make_session_token() -> str | None:
+    secret = _session_secret()
+    if secret is None:
+        return None
+    expiry = int(time.time()) + SESSION_DURATION
+    signature = hmac.new(secret.encode("utf-8"), str(expiry).encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{expiry}.{signature}"
+
+
+def verify_session_token(token: str) -> bool:
+    secret = _session_secret()
+    if secret is None or not token or "." not in token:
+        return False
+    expiry_str, _, signature = token.partition(".")
+    if not expiry_str.isdigit():
+        return False
+    expected = hmac.new(secret.encode("utf-8"), expiry_str.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        return False
+    return int(expiry_str) > int(time.time())
+
+
+# --------------------------------------------------------------------------
 # HTTP
 # --------------------------------------------------------------------------
 
@@ -185,12 +285,14 @@ class JournlyHandler(BaseHTTPRequestHandler):
 
     # -- helpers ----------------------------------------------------------
 
-    def send_json(self, payload, status=200):
+    def send_json(self, payload, status=200, set_cookie=None):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if set_cookie is not None:
+            self.send_header("Set-Cookie", set_cookie)
         self.end_headers()
         self.wfile.write(body)
 
@@ -210,13 +312,65 @@ class JournlyHandler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError):
             return None
 
+    # -- auth ---------------------------------------------------------------
+
+    def session_token_from_request(self) -> str | None:
+        header = self.headers.get("Cookie")
+        if not header:
+            return None
+        cookie = http.cookies.SimpleCookie()
+        try:
+            cookie.load(header)
+        except http.cookies.CookieError:
+            return None
+        morsel = cookie.get(SESSION_COOKIE)
+        return morsel.value if morsel else None
+
+    def is_authenticated(self) -> bool:
+        token = self.session_token_from_request()
+        return bool(token) and verify_session_token(token)
+
+    def session_cookie_header(self, token: str | None) -> str:
+        cookie = http.cookies.SimpleCookie()
+        if token is None:
+            cookie[SESSION_COOKIE] = ""
+            cookie[SESSION_COOKIE]["max-age"] = 0
+        else:
+            cookie[SESSION_COOKIE] = token
+            cookie[SESSION_COOKIE]["max-age"] = SESSION_DURATION
+        cookie[SESSION_COOKIE]["path"] = "/"
+        cookie[SESSION_COOKIE]["httponly"] = True
+        cookie[SESSION_COOKIE]["samesite"] = "Strict"
+        # Output only the Set-Cookie value portion (SimpleCookie prefixes
+        # "Set-Cookie: " which send_header already adds for us).
+        return cookie[SESSION_COOKIE].OutputString()
+
+    def require_auth(self) -> bool:
+        """If not authenticated, writes a 401 JSON response and returns False."""
+        if not auth_configured():
+            self.send_error_json(403, "Password not set up yet")
+            return False
+        if not self.is_authenticated():
+            self.send_error_json(401, "Not authenticated")
+            return False
+        return True
+
+    def refresh_cookie_or_none(self) -> str | None:
+        """Slide the session forward on every authenticated request."""
+        token = make_session_token()
+        return self.session_cookie_header(token) if token else None
+
     # -- routing ----------------------------------------------------------
+
+    PUBLIC_API_PATHS = {"/api/auth/status", "/api/auth/setup", "/api/auth/login"}
 
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
 
         if path.startswith("/api/"):
+            if path not in self.PUBLIC_API_PATHS and not self.require_auth():
+                return
             return self.handle_api_get(path, parse_qs(parsed.query))
         return self.serve_static(path)
 
@@ -226,6 +380,8 @@ class JournlyHandler(BaseHTTPRequestHandler):
 
         if not path.startswith("/api/entries/"):
             return self.send_error_json(404, "Not found")
+        if not self.require_auth():
+            return
 
         entry_date = unquote(path[len("/api/entries/"):])
         if not valid_date(entry_date):
@@ -251,13 +407,25 @@ class JournlyHandler(BaseHTTPRequestHandler):
                 "exists": exists,
                 "words": word_count(content),
                 "preview": derive_preview(content),
-            }
+            },
+            set_cookie=self.refresh_cookie_or_none(),
         )
 
     def do_POST(self):
-        # sendBeacon on page unload cannot issue PUT, so it posts here instead.
         parsed = urlparse(self.path)
-        if parsed.path == "/api/save-beacon":
+        path = parsed.path
+
+        if path == "/api/auth/setup":
+            return self.handle_auth_setup()
+        if path == "/api/auth/login":
+            return self.handle_auth_login()
+        if path == "/api/auth/logout":
+            return self.handle_auth_logout()
+
+        if path == "/api/save-beacon":
+            if not self.require_auth():
+                return
+            # sendBeacon on page unload cannot issue PUT, so it posts here instead.
             payload = self.read_json_body()
             if not isinstance(payload, dict):
                 return self.send_error_json(400, "Invalid JSON body")
@@ -274,13 +442,49 @@ class JournlyHandler(BaseHTTPRequestHandler):
             return self.send_json({"saved": True})
         return self.send_error_json(404, "Not found")
 
+    # -- auth endpoints -----------------------------------------------------
+
+    def handle_auth_setup(self):
+        if auth_configured():
+            return self.send_error_json(409, "Password already set up")
+        payload = self.read_json_body()
+        password = (payload or {}).get("password", "")
+        if not isinstance(password, str) or len(password) < 4:
+            return self.send_error_json(400, "Password must be at least 4 characters")
+        set_password(password)
+        token = make_session_token()
+        return self.send_json({"ok": True}, set_cookie=self.session_cookie_header(token))
+
+    def handle_auth_login(self):
+        if not auth_configured():
+            return self.send_error_json(403, "Password not set up yet")
+        payload = self.read_json_body()
+        password = (payload or {}).get("password", "")
+        if not isinstance(password, str) or not verify_password(password):
+            return self.send_error_json(401, "Incorrect password")
+        token = make_session_token()
+        return self.send_json({"ok": True}, set_cookie=self.session_cookie_header(token))
+
+    def handle_auth_logout(self):
+        return self.send_json({"ok": True}, set_cookie=self.session_cookie_header(None))
+
     def handle_api_get(self, path, query):
+        if path == "/api/auth/status":
+            return self.send_json(
+                {"configured": auth_configured(), "authenticated": self.is_authenticated()}
+            )
+
         if path == "/api/entries":
-            return self.send_json({"entries": list_entries(), "today": date.today().isoformat()})
+            return self.send_json(
+                {"entries": list_entries(), "today": date.today().isoformat()},
+                set_cookie=self.refresh_cookie_or_none(),
+            )
 
         if path == "/api/search":
             q = (query.get("q") or [""])[0]
-            return self.send_json({"entries": search_entries(q), "query": q})
+            return self.send_json(
+                {"entries": search_entries(q), "query": q}, set_cookie=self.refresh_cookie_or_none()
+            )
 
         if path.startswith("/api/entries/"):
             entry_date = unquote(path[len("/api/entries/"):])
@@ -288,7 +492,8 @@ class JournlyHandler(BaseHTTPRequestHandler):
                 return self.send_error_json(400, "Invalid date")
             content = read_entry(entry_date)
             return self.send_json(
-                {"date": entry_date, "content": content, "words": word_count(content)}
+                {"date": entry_date, "content": content, "words": word_count(content)},
+                set_cookie=self.refresh_cookie_or_none(),
             )
 
         return self.send_error_json(404, "Not found")
@@ -331,11 +536,41 @@ def find_open_port(preferred: int, host: str = "127.0.0.1") -> int:
     raise SystemExit(f"No free port found near {preferred}")
 
 
+def prompt_set_password() -> None:
+    """Interactively set the password from the terminal (input is hidden)."""
+    if auth_configured():
+        confirm = input("A password is already set. Replace it? [y/N] ").strip().lower()
+        if confirm != "y":
+            print("Cancelled.")
+            return
+    while True:
+        pw1 = getpass.getpass("New Journly password: ")
+        if len(pw1) < 4:
+            print("Password must be at least 4 characters.")
+            continue
+        pw2 = getpass.getpass("Confirm password: ")
+        if pw1 != pw2:
+            print("Passwords did not match, try again.")
+            continue
+        break
+    set_password(pw1)
+    print("Password set. Existing browser sessions are now signed out.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Journly - a distraction-free journal")
     parser.add_argument("--port", type=int, default=8765, help="preferred port (default: 8765)")
     parser.add_argument("--no-browser", action="store_true", help="do not open a browser")
+    parser.add_argument(
+        "--set-password",
+        action="store_true",
+        help="set or replace the journal password (prompts securely, then exits)",
+    )
     args = parser.parse_args()
+
+    if args.set_password:
+        prompt_set_password()
+        sys.exit(0)
 
     ENTRIES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -345,6 +580,8 @@ def main():
     server = ThreadingHTTPServer(("127.0.0.1", port), JournlyHandler)
     print(f"Journly is running at {url}")
     print(f"Entries: {ENTRIES_DIR}")
+    if not auth_configured():
+        print("No password set yet - you'll be asked to create one in the browser.")
     print("Press Ctrl+C to stop.")
 
     if not args.no_browser:

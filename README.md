@@ -24,6 +24,34 @@ Options:
 
 Or run it directly: `python3 journly.py`.
 
+## Password protection
+
+The first time you open Journly in a browser, you'll be asked to create a
+password. After that, every visit shows a lock screen until you enter it.
+
+- The password is never stored in plaintext — only a salted PBKDF2 hash
+  lives in `.journly_auth.json` (gitignored, permissions locked to your
+  user).
+- Once unlocked, you stay unlocked for **1 hour of activity**; the session
+  extends automatically while you're using the app and expires if it sits
+  idle.
+- Click the lock icon (🔒) in the sidebar, or press any shortcut below, to
+  lock immediately without waiting.
+- To change your password, set a new one from your own terminal (not
+  through the browser, so it's never typed anywhere but your own machine):
+
+  ```sh
+  python3 journly.py --set-password
+  ```
+
+  This prompts for the new password with hidden input and immediately
+  signs out any existing browser sessions.
+
+Note: this protects casual access to the app in a browser on your machine.
+It's not encryption — the `.md` files in `entries/` are still plain text on
+disk, and this is a local-only server, not something to expose to a
+network.
+
 ## Where your entries live
 
 Every day gets one file: `entries/YYYY-MM-DD.md`, plain Markdown, readable
