@@ -290,8 +290,10 @@
   // -------------------- auth / lock screen --------------------
 
   let setupMode = false; // true when no password exists yet and we're creating one
+  let sessionActive = false; // true only while the app is unlocked in this page view
 
   function showLockScreen(configured) {
+    sessionActive = false;
     setupMode = !configured;
     lockScreenEl.hidden = false;
     appEl.hidden = true;
@@ -307,6 +309,7 @@
   }
 
   function showApp() {
+    sessionActive = true;
     lockScreenEl.hidden = true;
     appEl.hidden = false;
   }
@@ -395,9 +398,19 @@
 
   editorEl.addEventListener("blur", () => flushSave(false));
 
-  window.addEventListener("beforeunload", () => {
+  function leavePage() {
     if (saveTimer) flushSave(true);
-  });
+    // Explicitly end the session on close/refresh/navigate-away so the app
+    // always re-locks the next time it's opened, rather than relying on a
+    // cookie expiry the user might still be inside.
+    if (sessionActive) {
+      navigator.sendBeacon("/api/auth/logout");
+      sessionActive = false;
+    }
+  }
+
+  window.addEventListener("beforeunload", leavePage);
+  window.addEventListener("pagehide", leavePage);
 
   searchEl.addEventListener("input", (e) => runSearch(e.target.value));
 

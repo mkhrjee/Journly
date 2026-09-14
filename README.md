@@ -32,11 +32,12 @@ password. After that, every visit shows a lock screen until you enter it.
 - The password is never stored in plaintext — only a salted PBKDF2 hash
   lives in `.journly_auth.json` (gitignored, permissions locked to your
   user).
-- Once unlocked, you stay unlocked for **1 hour of activity**; the session
-  extends automatically while you're using the app and expires if it sits
-  idle.
-- Click the lock icon (🔒) in the sidebar, or press any shortcut below, to
-  lock immediately without waiting.
+- Closing the tab, closing the browser, refreshing, or navigating away all
+  end your session immediately — reopening Journly always asks for the
+  password again. A 30-minute absolute limit is a fallback safety net for
+  crashes or force-quits where that can't fire.
+- Click the lock icon (🔒) in the sidebar to lock manually at any time
+  without closing anything.
 - To change your password, set a new one from your own terminal (not
   through the browser, so it's never typed anywhere but your own machine):
 

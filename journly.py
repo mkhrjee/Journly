@@ -37,7 +37,10 @@ PREVIEW_CHARS = 120
 SEARCH_RESULT_LIMIT = 200
 
 SESSION_COOKIE = "journly_session"
-SESSION_DURATION = 3600  # 1 hour, refreshed on every authenticated request
+# Explicit logout on page close (see /api/auth/logout beacon in app.js) is the
+# primary way sessions end. This is only a fallback ceiling for cases where
+# that beacon never fires (browser crash, force-quit, etc.).
+SESSION_DURATION = 1800  # 30 minutes, not extended by activity
 PBKDF2_ITERATIONS = 200_000
 
 CONTENT_TYPES = {
@@ -355,11 +358,6 @@ class JournlyHandler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def refresh_cookie_or_none(self) -> str | None:
-        """Slide the session forward on every authenticated request."""
-        token = make_session_token()
-        return self.session_cookie_header(token) if token else None
-
     # -- routing ----------------------------------------------------------
 
     PUBLIC_API_PATHS = {"/api/auth/status", "/api/auth/setup", "/api/auth/login"}
@@ -407,8 +405,7 @@ class JournlyHandler(BaseHTTPRequestHandler):
                 "exists": exists,
                 "words": word_count(content),
                 "preview": derive_preview(content),
-            },
-            set_cookie=self.refresh_cookie_or_none(),
+            }
         )
 
     def do_POST(self):
@@ -475,16 +472,11 @@ class JournlyHandler(BaseHTTPRequestHandler):
             )
 
         if path == "/api/entries":
-            return self.send_json(
-                {"entries": list_entries(), "today": date.today().isoformat()},
-                set_cookie=self.refresh_cookie_or_none(),
-            )
+            return self.send_json({"entries": list_entries(), "today": date.today().isoformat()})
 
         if path == "/api/search":
             q = (query.get("q") or [""])[0]
-            return self.send_json(
-                {"entries": search_entries(q), "query": q}, set_cookie=self.refresh_cookie_or_none()
-            )
+            return self.send_json({"entries": search_entries(q), "query": q})
 
         if path.startswith("/api/entries/"):
             entry_date = unquote(path[len("/api/entries/"):])
@@ -492,8 +484,7 @@ class JournlyHandler(BaseHTTPRequestHandler):
                 return self.send_error_json(400, "Invalid date")
             content = read_entry(entry_date)
             return self.send_json(
-                {"date": entry_date, "content": content, "words": word_count(content)},
-                set_cookie=self.refresh_cookie_or_none(),
+                {"date": entry_date, "content": content, "words": word_count(content)}
             )
 
         return self.send_error_json(404, "Not found")
